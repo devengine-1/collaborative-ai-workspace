@@ -8,7 +8,7 @@ Generate a document with AI, then highlight any sentence or paragraph and tell t
 ## Run it
 
 ```bash
-# 1. Backend  (http://127.0.0.1:8000, interactive docs at /docs)
+# 1. Backend  (http://127.0.0.1:8000, interactive docs at /api/docs)
 cd backend
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
@@ -22,7 +22,7 @@ npm install
 npm run dev
 ```
 
-The Vite dev server proxies `/api/*` to the backend, so you don't need CORS during local development.
+The Vite dev server proxies `/api/*` to the backend (all backend routes live under `/api`, matching the Vercel deployment), so you don't need CORS during local development.
 
 ## API
 

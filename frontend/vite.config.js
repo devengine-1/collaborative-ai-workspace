@@ -8,12 +8,11 @@ export default defineConfig(({ mode }) => {
     plugins: [react(), tailwindcss()],
     server: {
       port: 5173,
-      // Dev proxy: /api/* -> FastAPI, so no CORS setup is needed locally.
+      // Dev proxy: /api/* -> FastAPI (path kept as-is, same as on Vercel), so no CORS setup is needed locally.
       proxy: {
         '/api': {
           target: env.BACKEND_URL || 'http://127.0.0.1:8000',
           changeOrigin: true,
-          rewrite: (path) => path.replace(/^\/api/, ''),
         },
       },
     },

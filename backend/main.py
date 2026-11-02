@@ -2,11 +2,14 @@
 
 Endpoints
 ---------
-POST /generate          Create a new document from a prompt.
-POST /refine            Rewrite one highlighted passage of a document in place.
-GET  /documents         List recent documents.
-GET  /documents/{id}    Fetch a stored document (and its edit history).
-GET  /health            Liveness probe.
+All routes live under /api (matching the public path on Vercel, where the
+service receives the full request path).
+
+POST /api/generate        Create a new document from a prompt.
+POST /api/refine          Rewrite one highlighted passage of a document in place.
+GET  /api/documents       List recent documents.
+GET  /api/documents/{id}  Fetch a stored document (and its edit history).
+GET  /api/health          Liveness probe.
 
 Storage is a local SQLite file (zero cost, no server). Claude is called through
 the official Anthropic Python SDK.
@@ -34,7 +37,7 @@ import pymupdf  # PyMuPDF (the modern name for `fitz`)
 from bs4 import BeautifulSoup
 from youtube_transcript_api import YouTubeTranscriptApi
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import APIRouter, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -47,7 +50,10 @@ load_dotenv()
 MODEL = os.getenv("ANTHROPIC_MODEL", "claude-opus-5-5")
 GENERATE_EFFORT = os.getenv("GENERATE_EFFORT", "medium")  # low|medium|high|xhigh|max
 REFINE_EFFORT = os.getenv("REFINE_EFFORT", "low")
-DB_PATH = Path(os.getenv("DATABASE_PATH", Path(__file__).with_name("workspace.db")))
+# On Vercel the deployment filesystem is read-only; only /tmp is writable (and
+# it is ephemeral, per-instance). Locally the DB sits next to this file.
+_DEFAULT_DB = Path("/tmp/workspace.db") if os.getenv("VERCEL") else Path(__file__).with_name("workspace.db")
+DB_PATH = Path(os.getenv("DATABASE_PATH", _DEFAULT_DB))
 CORS_ORIGINS = [
     o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",") if o.strip()
 ]
@@ -465,7 +471,14 @@ def keep_edge_whitespace(original: str, rewritten: str) -> str:
 # App & routes
 # --------------------------------------------------------------------------- #
 
-app = FastAPI(title="Collaborative AI Workspace", version="0.1.0", lifespan=lifespan)
+app = FastAPI(
+    title="Collaborative AI Workspace",
+    version="0.1.0",
+    lifespan=lifespan,
+    docs_url="/api/docs",
+    redoc_url=None,
+    openapi_url="/api/openapi.json",
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -474,12 +487,15 @@ app.add_middleware(
 )
 
 
-@app.get("/health")
+api = APIRouter(prefix="/api")
+
+
+@api.get("/health")
 async def health() -> dict:
     return {"status": "ok", "model": MODEL}
 
 
-@app.post("/generate", response_model=GenerateResponse)
+@api.post("/generate", response_model=GenerateResponse)
 async def generate(req: GenerateRequest) -> GenerateResponse:
     refs = load_references(req.context_ids)
     content = await ask_claude(
@@ -498,7 +514,7 @@ async def generate(req: GenerateRequest) -> GenerateResponse:
     return GenerateResponse(id=doc_id, content=content, context_ids=[r["id"] for r in refs])
 
 
-@app.post("/refine", response_model=RefineResponse)
+@api.post("/refine", response_model=RefineResponse)
 async def refine(req: RefineRequest) -> RefineResponse:
     if not req.selected_text.strip():
         raise HTTPException(400, "selected_text must contain non-whitespace characters.")
@@ -537,7 +553,7 @@ async def refine(req: RefineRequest) -> RefineResponse:
     )
 
 
-@app.post("/context/upload", response_model=list[ContextFileOut])
+@api.post("/context/upload", response_model=list[ContextFileOut])
 async def upload_context(files: list[UploadFile] = File(...)) -> list[ContextFileOut]:
     # Extract everything first so one bad file doesn't leave a partial upload.
     extracted: list[tuple[str, str]] = []
@@ -564,7 +580,7 @@ async def upload_context(files: list[UploadFile] = File(...)) -> list[ContextFil
     return out
 
 
-@app.post("/context/url", response_model=ContextFileOut)
+@api.post("/context/url", response_model=ContextFileOut)
 async def add_context_url(req: ContextUrlRequest) -> ContextFileOut:
     url = req.url.strip()
     if not re.match(r"^https?://", url, re.I):
@@ -586,21 +602,21 @@ async def add_context_url(req: ContextUrlRequest) -> ContextFileOut:
     return ContextFileOut(id=cur.lastrowid, filename=filename, char_count=len(content))
 
 
-@app.get("/context", response_model=list[ContextFileOut])
+@api.get("/context", response_model=list[ContextFileOut])
 async def list_context() -> list[ContextFileOut]:
     with db() as conn:
         rows = conn.execute("SELECT id, filename, char_count FROM context_files ORDER BY id").fetchall()
     return [ContextFileOut(**dict(r)) for r in rows]
 
 
-@app.delete("/context/{file_id}", status_code=204)
+@api.delete("/context/{file_id}", status_code=204)
 async def delete_context(file_id: int) -> None:
     with db() as conn:
         if not conn.execute("DELETE FROM context_files WHERE id = ?", (file_id,)).rowcount:
             raise HTTPException(404, "Context file not found.")
 
 
-@app.get("/documents", response_model=list[DocumentSummary])
+@api.get("/documents", response_model=list[DocumentSummary])
 async def list_documents(limit: int = 20) -> list[DocumentSummary]:
     with db() as conn:
         rows = conn.execute(
@@ -613,7 +629,7 @@ async def list_documents(limit: int = 20) -> list[DocumentSummary]:
     ]
 
 
-@app.get("/documents/{doc_id}", response_model=DocumentOut)
+@api.get("/documents/{doc_id}", response_model=DocumentOut)
 async def get_document(doc_id: int) -> DocumentOut:
     with db() as conn:
         row = conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
@@ -625,6 +641,9 @@ async def get_document(doc_id: int) -> DocumentOut:
             (doc_id,),
         ).fetchall()
     return DocumentOut(**dict(row), edits=[EditOut(**dict(e)) for e in edits])
+
+
+app.include_router(api)
 
 
 if __name__ == "__main__":
